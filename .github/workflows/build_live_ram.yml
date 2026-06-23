@@ -1,14 +1,19 @@
 name: Build ARM64 Live RAM Tester (20.04 & 24.04)
 
 on:
-  workflow_dispatch: # 允许你手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build-live:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ubuntu_ver: ["20.04", "24.04"]
+        # 同时编译 20.04 (focal) 和 24.04 (noble)
+        include:
+          - ubuntu_ver: "20.04"
+            codename: "focal"
+          - ubuntu_ver: "24.04"
+            codename: "noble"
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -18,37 +23,34 @@ jobs:
 
     - name: Build Live RAM System
       run: |
-        sudo apt update && sudo apt install -y squashfs-tools wget
+        sudo apt update && sudo apt install -y debootstrap binfmt-support qemu-user-static
         
-        if [ "${{ matrix.ubuntu_ver }}" = "20.04" ]; then
-          ISO_URL="https://releases.ubuntu.com/20.04/ubuntu-20.04.6-live-server-arm64.iso"
-        else
-          ISO_URL="https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-arm64.iso"
-        fi
+        mkdir -p squashfs-root output
         
-        echo "正在下载 Ubuntu ${{ matrix.ubuntu_ver }} 官方原版镜像..."
-        wget -q $ISO_URL -O ubuntu.iso
+        # 直接从官方源在线构建最小化的 ARM64 骨架，完美避开 ISO 下载失败问题
+        echo "正在构建 Ubuntu ${{ matrix.ubuntu_ver }} 核心根系统..."
+        sudo debootstrap --arch=arm64 ${{ matrix.codename }} squashfs-root http://ports.ubuntu.com/ubuntu-ports/
         
-        mkdir iso_mnt
-        sudo mount -o loop ubuntu.iso iso_mnt
-        
-        mkdir output
-        cp iso_mnt/casper/vmlinuz output/vmlinuz-${{ matrix.ubuntu_ver }}
-        
-        unsquashfs -d squashfs-root iso_mnt/casper/filesystem.squashfs || unsquashfs -d squashfs-root iso_mnt/casper/ubuntu-server-minimal.squashfs
-        sudo umount iso_mnt
-        
+        # 拷贝 QEMU 模拟器和网络配置
         sudo cp /usr/bin/qemu-aarch64-static squashfs-root/usr/bin/
         sudo cp /etc/resolv.conf squashfs-root/etc/resolv.conf
         
+        # 进入系统安装全套工具与纯正官方内核
         cat << 'EOF' | sudo chroot squashfs-root /bin/bash
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
+        
+        # 核心网卡驱动与纯正官方内核
+        apt-get install -y linux-image-generic linux-firmware
+        
+        # 压测、监控、硬件识别全套大礼包
         apt-get install -y stress-ng htop ipmitool iproute2 net-tools udhcpc ethtool tcpdump lm-sensors vim-tiny openssh-server memtester nvme-cli smartmontools lspci lsusb iputils-ping curl
         
+        # 允许 root 登录，密码设为 root
         echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
         echo "root:root" | chpasswd
         
+        # 配置网卡全自动 DHCP
         mkdir -p /etc/network
         echo -e "auto lo\niface lo inet loopback" > /etc/network/interfaces
         for i in {0..3}; do
@@ -56,10 +58,14 @@ jobs:
         done
         
         apt-get clean
-        rm -f /usr/bin/qemu-aarch64-static /etc/resolv.conf
         EOF
         
-        echo "正在将全套系统打包成内存文件系统..."
+        # 提取刚刚安装好的纯正内核文件
+        cp squashfs-root/boot/vmlinuz* output/vmlinuz-${{ matrix.ubuntu_ver }}
+        
+        # 清理多余文件并打包成纯内存运行的 initrd.img
+        sudo rm -f squashfs-root/usr/bin/qemu-aarch64-static squashfs-root/etc/resolv.conf
+        echo "正在打包高压缩内存文件系统..."
         cd squashfs-root
         sudo find . | sudo cpio -o -H newc | gzip -9 > ../output/initrd-${{ matrix.ubuntu_ver }}.img
         cd ..
