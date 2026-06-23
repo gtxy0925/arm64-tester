@@ -1,0 +1,71 @@
+name: Build ARM64 Live RAM Tester (20.04 & 24.04)
+
+on:
+  workflow_dispatch: # 允许你手动点击按钮触发
+
+jobs:
+  build-live:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ubuntu_ver: ["20.04", "24.04"]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Build Live RAM System
+      run: |
+        sudo apt update && sudo apt install -y squashfs-tools wget
+        
+        if [ "${{ matrix.ubuntu_ver }}" = "20.04" ]; then
+          ISO_URL="https://releases.ubuntu.com/20.04/ubuntu-20.04.6-live-server-arm64.iso"
+        else
+          ISO_URL="https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-arm64.iso"
+        fi
+        
+        echo "正在下载 Ubuntu ${{ matrix.ubuntu_ver }} 官方原版镜像..."
+        wget -q $ISO_URL -O ubuntu.iso
+        
+        mkdir iso_mnt
+        sudo mount -o loop ubuntu.iso iso_mnt
+        
+        mkdir output
+        cp iso_mnt/casper/vmlinuz output/vmlinuz-${{ matrix.ubuntu_ver }}
+        
+        unsquashfs -d squashfs-root iso_mnt/casper/filesystem.squashfs || unsquashfs -d squashfs-root iso_mnt/casper/ubuntu-server-minimal.squashfs
+        sudo umount iso_mnt
+        
+        sudo cp /usr/bin/qemu-aarch64-static squashfs-root/usr/bin/
+        sudo cp /etc/resolv.conf squashfs-root/etc/resolv.conf
+        
+        cat << 'EOF' | sudo chroot squashfs-root /bin/bash
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y stress-ng htop ipmitool iproute2 net-tools udhcpc ethtool tcpdump lm-sensors vim-tiny openssh-server memtester nvme-cli smartmontools lspci lsusb iputils-ping curl
+        
+        echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+        echo "root:root" | chpasswd
+        
+        mkdir -p /etc/network
+        echo -e "auto lo\niface lo inet loopback" > /etc/network/interfaces
+        for i in {0..3}; do
+          echo -e "\nauto eth$i\niface eth$i inet dhcp" >> /etc/network/interfaces
+        done
+        
+        apt-get clean
+        rm -f /usr/bin/qemu-aarch64-static /etc/resolv.conf
+        EOF
+        
+        echo "正在将全套系统打包成内存文件系统..."
+        cd squashfs-root
+        sudo find . | sudo cpio -o -H newc | gzip -9 > ../output/initrd-${{ matrix.ubuntu_ver }}.img
+        cd ..
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Ubuntu-${{ matrix.ubuntu_ver }}-LiveRAM
+        path: output/
