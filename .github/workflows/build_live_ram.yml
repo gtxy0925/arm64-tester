@@ -8,7 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 同时编译 20.04 (focal) 和 24.04 (noble)
         include:
           - ubuntu_ver: "20.04"
             codename: "focal"
@@ -27,26 +26,31 @@ jobs:
         
         mkdir -p squashfs-root output
         
-        # 直接从官方源在线构建最小化的 ARM64 骨架，完美避开 ISO 下载失败问题
         echo "正在构建 Ubuntu ${{ matrix.ubuntu_ver }} 核心根系统..."
         sudo debootstrap --arch=arm64 ${{ matrix.codename }} squashfs-root http://ports.ubuntu.com/ubuntu-ports/
         
-        # 拷贝 QEMU 模拟器和网络配置
         sudo cp /usr/bin/qemu-aarch64-static squashfs-root/usr/bin/
         sudo cp /etc/resolv.conf squashfs-root/etc/resolv.conf
         
-        # 进入系统安装全套工具与纯正官方内核
         cat << 'EOF' | sudo chroot squashfs-root /bin/bash
         export DEBIAN_FRONTEND=noninteractive
+        
+        # 核心修正：强行向 sources.list 写入完整的 main universe multiverse 软件源
+        CODENAME=$(cat /etc/os-release | grep VERSION_CODENAME | cut -d= -f2)
+        echo "deb http://ports.ubuntu.com/ubuntu-ports/ ${CODENAME} main restricted universe multiverse" > /etc/apt/sources.list
+        echo "deb http://ports.ubuntu.com/ubuntu-ports/ ${CODENAME}-updates main restricted universe multiverse" >> /etc/apt/sources.list
+        echo "deb http://ports.ubuntu.com/ubuntu-ports/ ${CODENAME}-security main restricted universe multiverse" >> /etc/apt/sources.list
+        
         apt-get update
         
-        # 核心网卡驱动与纯正官方内核
+        # 优先安装核心网卡驱动与纯正官方内核
         apt-get install -y linux-image-generic linux-firmware
         
-        # 压测、监控、硬件识别全套大礼包
-        apt-get install -y stress-ng htop ipmitool iproute2 net-tools udhcpc ethtool tcpdump lm-sensors vim-tiny openssh-server memtester nvme-cli smartmontools lspci lsusb iputils-ping curl
+        # 压测、监控、硬件识别全套大礼包（增加了 pciutils 和 usbutils 提供 lspci 和 lsusb）
+        apt-get install -y stress-ng htop ipmitool iproute2 net-tools udhcpc ethtool tcpdump lm-sensors vim-tiny openssh-server memtester nvme-cli smartmontools pciutils usbutils iputils-ping curl
         
-        # 允许 root 登录，密码设为 root
+        # 确保 ssh 目录存在并配置 root 登录
+        mkdir -p /etc/ssh
         echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
         echo "root:root" | chpasswd
         
@@ -60,10 +64,9 @@ jobs:
         apt-get clean
         EOF
         
-        # 提取刚刚安装好的纯正内核文件
+        # 提取刚刚安装好的纯正内核文件（完美兼容通配符，防止找不到具体文件名）
         cp squashfs-root/boot/vmlinuz* output/vmlinuz-${{ matrix.ubuntu_ver }}
         
-        # 清理多余文件并打包成纯内存运行的 initrd.img
         sudo rm -f squashfs-root/usr/bin/qemu-aarch64-static squashfs-root/etc/resolv.conf
         echo "正在打包高压缩内存文件系统..."
         cd squashfs-root
